@@ -1,0 +1,142 @@
+import csv
+import sqlite3
+import re
+import os
+
+class CSVDatabaseImporter:
+    def __init__(self, db_name="users.db"):
+        self.db_name = db_name
+        self.stats = {"total": 0, "inserted": 0, "duplicates": 0, "invalid": 0, "errors": []}
+        self.setup_db()
+
+    def setup_db(self):
+        with sqlite3.connect(self.db_name) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    age INTEGER,
+                    city TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_email ON users(email)")
+            cur.execute("""
+                CREATE TRIGGER IF NOT EXISTS update_timestamp
+                AFTER UPDATE ON users
+                BEGIN
+                    UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+                END
+            """)
+
+    def valid_email(self, email):
+        return re.match(r"^[^@]+@[^@]+\.[^@]+$", email) is not None
+
+    def valid_age(self, value):
+        try:
+            age = int(value)
+            return age if 0 < age < 150 else None
+        except:
+            return None
+
+    def validate(self, row):
+        if not row.get("name"):
+            return False, "missing name"
+        if not row.get("email"):
+            return False, "missing email"
+        if not self.valid_email(row["email"]):
+            return False, "invalid email"
+        if row.get("age") and self.valid_age(row["age"]) is None:
+            return False, "invalid age"
+        return True, ""
+
+    def read_csv(self, path):
+        if not os.path.exists(path):
+            print("CSV file not found")
+            return []
+
+        valid = []
+
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader, start=2):
+                self.stats["total"] += 1
+                row = {k.strip(): v.strip() if v else None for k, v in row.items()}
+                ok, err = self.validate(row)
+                if ok:
+                    valid.append(row)
+                else:
+                    self.stats["invalid"] += 1
+                    self.stats["errors"].append(f"row {i}: {err}")
+
+        return valid
+
+    def insert(self, users):
+        with sqlite3.connect(self.db_name) as conn:
+            cur = conn.cursor()
+            for u in users:
+                try:
+                    age = self.valid_age(u["age"]) if u.get("age") else None
+                    cur.execute(
+                        "INSERT INTO users (name, email, age, city) VALUES (?, ?, ?, ?)",
+                        (u["name"], u["email"].lower(), age, u.get("city"))
+                    )
+                    self.stats["inserted"] += 1
+                except sqlite3.IntegrityError:
+                    self.stats["duplicates"] += 1
+                except Exception as e:
+                    self.stats["errors"].append(str(e))
+
+    def show_users(self, limit=20):
+        with sqlite3.connect(self.db_name) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, name, email, age, city FROM users ORDER BY id LIMIT ?",
+                (limit,)
+            )
+            rows = cur.fetchall()
+            for r in rows:
+                print(r)
+
+    def summary(self):
+        print("\nImport summary")
+        print(f"Total rows: {self.stats['total']}")
+        print(f"Inserted: {self.stats['inserted']}")
+        print(f"Duplicates: {self.stats['duplicates']}")
+        print(f"Invalid: {self.stats['invalid']}")
+        if self.stats["errors"]:
+            print("Errors:")
+            for e in self.stats["errors"][:5]:
+                print("-", e)
+
+    def sample_csv(self, name="sample_users.csv"):
+        data = [
+            ["name", "email", "age", "city"],
+            ["John Doe", "john@example.com", "30", "New York"],
+            ["Jane Smith", "jane@example.com", "25", "LA"],
+            ["Bad Email", "not-email", "20", "SF"],
+            ["Too Old", "old@example.com", "200", "Chicago"],
+            ["Duplicate", "john@example.com", "40", "Miami"]
+        ]
+        with open(name, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(data)
+        return name
+
+
+def main():
+    importer = CSVDatabaseImporter()
+    csv_file = importer.sample_csv()
+    users = importer.read_csv(csv_file)
+    if users:
+        importer.insert(users)
+        importer.show_users()
+        importer.summary()
+    else:
+        print("No valid users found")
+
+
+if __name__ == "__main__":
+    main()
