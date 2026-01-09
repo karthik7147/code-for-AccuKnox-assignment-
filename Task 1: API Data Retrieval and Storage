@@ -1,0 +1,117 @@
+import requests
+import sqlite3
+from typing import List, Dict, Optional
+class BooksAPIHandler:
+    def __init__(self, db_name: str = "books.db"):
+        self.db_name = db_name
+        self.base_url = "https://openlibrary.org/search.json"
+        self.init_database()
+    def init_database(self):
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                author TEXT,
+                publication_year INTEGER,
+                isbn TEXT,
+                publisher TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(title, author, publication_year)
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print(f"Database '{self.db_name}' initialized successfully.\n")
+    def fetch_books(self, query: str, limit: int = 10) -> Optional[List[Dict]]:
+        try:
+            params = {"q": query,"limit": limit,"fields": "title,author_name,first_publish_year,isbn,publisher"}
+            response = requests.get(self.base_url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            books = []
+            for doc in data.get("docs", []):
+                books.append({"title": doc.get("title", "Unknown"),"author": ", ".join(doc.get("author_name", ["Unknown"])),"publication_year": doc.get("first_publish_year"),"isbn": ", ".join(doc.get("isbn", [])[:3]) if doc.get("isbn") else None,"publisher": ", ".join(doc.get("publisher", [])[:2]) if doc.get("publisher") else None})
+            print(f"Successfully fetched {len(books)} books from API.")
+            return books
+        except requests.RequestException as e:
+            print(f"Error fetching data from API: {e}")
+            return None
+    def store_books(self, books: List[Dict]) -> int:
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        count = 0
+        for book in books:
+            try:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO books
+                    (title, author, publication_year, isbn, publisher)
+                    VALUES (?, ?, ?, ?, ?)
+                """,(book["title"],book["author"],book["publication_year"],book["isbn"],book["publisher"]))
+                if cursor.rowcount > 0:
+                    count += 1
+            except sqlite3.Error as e:
+                print(f"Error inserting book '{book['title']}': {e}")
+        conn.commit()
+        conn.close()
+        print(f"Inserted {count} new books into database.\n")
+        return count
+    def display_books(self, limit: int = None):
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        query = "SELECT title, author, publication_year, isbn, publisher FROM books"
+        if limit:
+            query += " LIMIT ?"
+            cursor.execute(query, (limit,))
+        else:
+            cursor.execute(query)
+        rows = cursor.fetchall()
+        if not rows:
+            print("No books found in database.")
+            conn.close()
+            return
+        print(f"\n{'='*80}")
+        print(f"Books in Database (Total: {len(rows)})")
+        print(f"{'='*80}\n")
+        for i, row in enumerate(rows, 1):
+            title, author, year, isbn, publisher = row
+            print(f"{i}. Title: {title}")
+            print(f"   Author: {author}")
+            print(f"   Year: {year if year else 'N/A'}")
+            if isbn:
+                print(f"   ISBN: {isbn[:50]}")
+            print()
+        conn.close()
+    def get_statistics(self):
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM books")
+        total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT publication_year, COUNT(*) as count
+            FROM books
+            WHERE publication_year IS NOT NULL
+            GROUP BY publication_year
+            ORDER BY count DESC
+            LIMIT 5
+        """)
+        stats = cursor.fetchall()
+        print(f"\nDatabase Statistics:")
+        print(f"Total books: {total}")
+        print(f"\nTop publication years:")
+        for year, count in stats:
+            print(f"  {year}: {count} books")
+        conn.close()
+def main():
+    handler = BooksAPIHandler()
+    print("Fetching books about 'Python programming'...")
+    books = handler.fetch_books("Python programming", 15)
+    if books:
+        handler.store_books(books)
+        handler.display_books(10)
+        handler.get_statistics()
+    else:
+        print("Failed to fetch books from API.")
+if __name__ == "__main__":
+    main()
